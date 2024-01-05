@@ -5,6 +5,10 @@ use std::ops::DerefMut;
 
 use crate::client::repliestypes::Replies;
 use crate::client::ringbuffer::RingBuffer;
+use crate::tui::CS_ERR;
+use crate::tui::CS_OK;
+use crate::tui::Styled;
+use crate::tui::StyledLine;
 
 mod ringbuffer;
 mod repliestypes;
@@ -74,24 +78,23 @@ pub struct Channel {
 
 pub type MessageDisplay = Result<String, String>;
 
-#[derive(Debug)]
 pub struct Client {
     stream: Option<TcpStream>,
     buffer: RingBuffer<u8>,
     connected: bool,
     user_info: UserInfo,
-    return_lines: Vec<MessageDisplay>,
+    return_lines: Vec<StyledLine>,
 }
 
 macro_rules! chat_msg {
     ($chat:expr, $($arg:tt)*) => {
-        $chat.push(Ok(format!($($arg)*)))
+        $chat.push(StyledLine::StyledItem(Styled::StyledString(CS_OK.clone(), format!($($arg)*))))
     }
 }
 
-macro_rules! chat_error {
+macro_rules! parse_error {
     ($chat:expr, $($arg:tt)*) => {
-        $chat.push(Err(format!($($arg)*)))
+        $chat.push(StyledLine::StyledItem(Styled::StyledString(CS_ERR.clone(), format!($($arg)*))))
     }
 }
 
@@ -100,7 +103,7 @@ impl Client {
     pub fn new(user_info: UserInfo) -> Self {
         Client {
             stream: None,
-            buffer: RingBuffer::new(1024 * 10), //8kb
+            buffer: RingBuffer::new(1024 * 8), //8kb
             connected: false,
             user_info,
             return_lines: Vec::new(),
@@ -152,7 +155,7 @@ impl Client {
         }
     }
 
-    pub fn process(&mut self) -> Vec<MessageDisplay> {
+    pub fn process(&mut self) -> Vec<crate::tui::StyledLine> {
         let mut new_data = false;
         if let Some(ref mut stream) = self.stream {
             match stream.read_vectored(self.buffer.slices().deref_mut()) {
@@ -161,7 +164,7 @@ impl Client {
                     new_data = true;
                 }
                 Err(e) => if e.kind() != ErrorKind::WouldBlock {
-                    chat_error!(self.return_lines, "{}", e);
+                    parse_error!(self.return_lines, "{}", e);
                     self.connected = false;
                 }
             }
@@ -174,6 +177,7 @@ impl Client {
 
         std::mem::take(&mut self.return_lines)
     }
+
     fn try_read_server_data(&mut self) {
         while let Some(up_to) = self.buffer.find_first(&[13u8, 10u8]) {
             if let Some(message_bytes) = self.buffer.consume(up_to) {
@@ -201,7 +205,7 @@ impl Client {
             }
         }
 
-        chat_error!(self.return_lines,"<<< {message}");
+        parse_error!(self.return_lines,"<<< {message}");
     }
 
     fn process_ping(&mut self, message: &str) -> bool {
@@ -245,7 +249,9 @@ impl Client {
         }
     }
 
-    pub fn send_message(&mut self, dest: String, msg: String) {
-        self.send_bytes(format!("PRIVMSG #{dest} :{msg}").as_bytes());
+    pub fn send_message(&mut self, dest: String, msg: String) -> String {
+        let msg = format!("PRIVMSG #{dest} :{msg}");
+        self.send_bytes(msg.as_bytes());
+        msg
     }
 }

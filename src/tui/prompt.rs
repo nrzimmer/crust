@@ -12,7 +12,8 @@ use std::io::Write;
 
 use crossterm::cursor::MoveTo;
 use crossterm::QueueableCommand;
-use crossterm::style::Color;
+use crossterm::style::{Attributes, Color};
+use crate::tui::AT_RST;
 
 use crate::tui::doublebuffer::DoubleBuffer;
 
@@ -56,12 +57,12 @@ impl Prompt {
             let begin = self.scroll;
             let end = cmp::min(self.scroll + w, self.buffer.len());
             if let Some(window) = self.buffer.get(begin..end) {
-                buffer.put_cells(x, y, window, Color::White, Color::Black);
+                buffer.put_cells(x, y, window, Color::White, Color::Black, Color::Reset, AT_RST.clone());
                 if self.scroll > 0 {
-                    buffer.put_cell(x - 1, y, '<', Color::White, Color::Black);
+                    buffer.put_cell(x - 1, y, '<', Color::White, Color::Black, Color::Reset, AT_RST.clone());
                 }
                 if self.scroll + w < self.buffer.len() {
-                    buffer.put_cell(x + w, y, '>', Color::White, Color::Black);
+                    buffer.put_cell(x + w, y, '>', Color::White, Color::Black, Color::Reset, AT_RST.clone());
                 }
             }
         }

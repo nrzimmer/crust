@@ -163,11 +163,11 @@ impl Commands {
             let mut iter = prompt.splitn(2, |x| *x == ' ');
             let name = iter.next().unwrap_or(prompt).iter().collect::<String>();
             let argument = iter.next().unwrap_or(&[]).iter().collect::<String>();
-            if let Some(command) = self.find_command(&name) {
-                return (command.run)(self, &argument);
+            return if let Some(command) = self.find_command(&name) {
+                (command.run)(self, &argument)
             } else {
-                return Err(InvalidCommand("/{name}`"));
-            }
+                Err(InvalidCommand("/{name}`"))
+            };
         }
         Err(NotACommand)
     }

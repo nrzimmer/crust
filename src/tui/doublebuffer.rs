@@ -12,8 +12,9 @@ use std::io::Write;
 
 use crossterm::cursor::MoveTo;
 use crossterm::QueueableCommand;
-use crossterm::style::{Color, Print, SetBackgroundColor, SetForegroundColor};
+use crossterm::style::{Attributes, Color, Print, SetAttributes, SetBackgroundColor, SetForegroundColor, SetUnderlineColor};
 use crossterm::terminal::{Clear, ClearType};
+use crate::tui::AT_RST;
 
 pub struct DoubleBuffer {
     curr: Vec<Cell>,
@@ -36,28 +37,6 @@ impl DoubleBuffer {
         mem::swap(&mut self.curr, &mut self.prev);
     }
 
-    pub fn flush(&self, qc: &mut impl Write) -> io::Result<()> {
-        let mut fg_curr = Color::White;
-        let mut bg_curr = Color::Black;
-        qc.queue(Clear(ClearType::All))?;
-        qc.queue(SetForegroundColor(fg_curr))?;
-        qc.queue(SetBackgroundColor(bg_curr))?;
-        qc.queue(MoveTo(0, 0))?;
-        for Cell { ch, fg, bg } in self.prev.iter() {
-            if fg_curr != *fg {
-                fg_curr = *fg;
-                qc.queue(SetForegroundColor(fg_curr))?;
-            }
-            if bg_curr != *bg {
-                bg_curr = *bg;
-                qc.queue(SetBackgroundColor(bg_curr))?;
-            }
-            qc.queue(Print(ch))?;
-        }
-        qc.flush()?;
-        Ok(())
-    }
-
     pub fn resize(&mut self, w: usize, h: usize) {
         if self.width != w || self.height != h {
             self.curr.resize(w * h, Cell::default());
@@ -73,35 +52,73 @@ impl DoubleBuffer {
         self.curr.fill(Cell::default());
     }
 
-    pub fn put_cell(&mut self, x: usize, y: usize, ch: char, fg: Color, bg: Color) {
+    pub fn put_cell(&mut self, x: usize, y: usize, ch: char, fg: Color, bg: Color, ul: Color, at: Attributes) {
         if let Some(cell) = self.curr.get_mut(y * self.width + x) {
-            *cell = Cell { ch, fg, bg }
+            *cell = Cell { ch, fg, bg, ul, at }
         }
     }
 
-    pub fn put_cells(&mut self, x: usize, y: usize, chs: &[char], fg: Color, bg: Color) {
+    pub fn put_cells(&mut self, x: usize, y: usize, chs: &[char], fg: Color, bg: Color, ul: Color, at: Attributes) {
         let start = y * self.width + x;
         for (offset, &ch) in chs.iter().enumerate() {
             if let Some(cell) = self.curr.get_mut(start + offset) {
-                *cell = Cell { ch, fg, bg };
+                *cell = Cell { ch, fg, bg, ul, at };
             } else {
                 break;
             }
         }
     }
 
+    pub fn flush(&self, qc: &mut impl Write) -> io::Result<()> {
+        let mut fg_curr = Color::White;
+        let mut bg_curr = Color::Black;
+        let mut ul_curr = Color::Reset;
+        let mut at_curr: Attributes = AT_RST.clone();
+        qc.queue(Clear(ClearType::All))?;
+        qc.queue(SetForegroundColor(fg_curr))?;
+        qc.queue(SetBackgroundColor(bg_curr))?;
+        qc.queue(SetUnderlineColor(bg_curr))?;
+        qc.queue(SetAttributes(at_curr))?;
+        qc.queue(MoveTo(0, 0))?;
+        for &Cell { ch, fg, bg , ul, at} in self.prev.iter() {
+            if fg_curr != fg {
+                fg_curr = fg;
+                qc.queue(SetForegroundColor(fg_curr))?;
+            }
+            if bg_curr != bg {
+                bg_curr = bg;
+                qc.queue(SetBackgroundColor(bg_curr))?;
+            }
+            if ul_curr != ul {
+                ul_curr = ul;
+                qc.queue(SetUnderlineColor(ul_curr))?;
+            }
+            if at_curr != at {
+                at_curr = at;
+                qc.queue(SetAttributes(at_curr))?;
+            }
+            qc.queue(Print(ch))?;
+        }
+        qc.flush()?;
+        Ok(())
+    }
+
     pub fn update(&mut self, qc: &mut impl QueueableCommand) -> io::Result<()> {
         let mut fg_curr = Color::White;
         let mut bg_curr = Color::Black;
+        let mut ul_curr = Color::Reset;
+        let mut at_curr = AT_RST.clone();
         let mut x_prev = 0;
         let mut y_prev = 0;
         qc.queue(SetForegroundColor(fg_curr))?;
         qc.queue(SetBackgroundColor(bg_curr))?;
+        qc.queue(SetUnderlineColor(bg_curr))?;
+        qc.queue(SetAttributes(at_curr))?;
 
         self.prev.iter().zip(self.curr.iter()).enumerate().filter(|(_, (a, b))| {
             *a != *b
         }).try_for_each(
-            |(i, (_, &Cell { ch, fg, bg }))| {
+            |(i, (_, &Cell { ch, fg, bg , ul, at}))| {
                 let x = i % self.width;
                 let y = i / self.width;
 
@@ -122,6 +139,16 @@ impl DoubleBuffer {
                     qc.queue(SetBackgroundColor(bg_curr))?;
                 }
 
+                if ul_curr != ul {
+                    ul_curr = ul;
+                    qc.queue(SetUnderlineColor(ul_curr))?;
+                }
+
+                if at_curr != at {
+                    at_curr = at;
+                    qc.queue(SetAttributes(at_curr))?;
+                }
+
                 qc.queue(Print(ch))?;
 
                 Ok(())
@@ -135,6 +162,8 @@ struct Cell {
     ch: char,
     fg: Color,
     bg: Color,
+    ul: Color,
+    at: Attributes,
 }
 
 impl Default for Cell {
@@ -143,6 +172,8 @@ impl Default for Cell {
             ch: ' ',
             fg: Color::White,
             bg: Color::Black,
+            ul: Color::Reset,
+            at: AT_RST.clone(),
         }
     }
 }

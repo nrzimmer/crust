@@ -8,19 +8,22 @@
 // Twitch: https://www.twitch.tv/tsoding
 
 use std::{cmp, io, thread};
+use std::any::Any;
 use std::cell::RefCell;
+use std::fmt::Display;
 use std::io::{stdout, Write};
 use std::rc::Rc;
 use std::time::Duration;
 
 use crossterm::{event, terminal};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::style::Color;
+use crossterm::style::{Attribute, Attributes, Color, ContentStyle};
+use lazy_static::lazy_static;
 
 use doublebuffer::DoubleBuffer;
 use prompt::Prompt;
 
-use crate::client::{Client, MessageDisplay};
+use crate::client::Client;
 use crate::tui::commands::CmdErr::*;
 use crate::tui::commands::CmdOk::*;
 use crate::tui::commands::Commands;
@@ -28,6 +31,10 @@ use crate::tui::commands::Commands;
 mod doublebuffer;
 mod prompt;
 mod commands;
+mod topic;
+mod bufferselector;
+mod users;
+mod logdisplay;
 
 macro_rules! todo_ui {
     () => {
@@ -44,12 +51,42 @@ struct Rect {
     h: usize,
 }
 
+pub enum Styled {
+    StyledString(ContentStyle, String),
+    StyledStr(ContentStyle, &'static str),
+    StyledChar(ContentStyle, char),
+    StyledByteArray(ContentStyle, Vec<u8>),
+}
+
+pub enum StyledLine {
+    StyledItem(Styled),
+    StyledVec(Vec<Styled>),
+}
+
 pub struct Tui {
     client: Rc<RefCell<Client>>,
     buffer: DoubleBuffer,
     width: usize,
     height: usize,
-    chat: Vec<MessageDisplay>,
+    chat: Vec<StyledLine>,
+}
+
+lazy_static! {
+    pub static ref AT_RST : Attributes = Attributes::from(Attribute::Reset);
+
+    pub static ref CS_OK : ContentStyle = ContentStyle {
+        foreground_color: Some(Color::White),
+        background_color: Some(Color::Black),
+        underline_color: None,
+        attributes: AT_RST.clone(),
+    };
+
+    pub static ref CS_ERR : ContentStyle = ContentStyle {
+        foreground_color: Some(Color::Red),
+        background_color: Some(Color::Black),
+        underline_color: None,
+        attributes: AT_RST.clone(),
+    };
 }
 
 impl Tui {
@@ -172,10 +209,22 @@ impl Tui {
                                                         // This is a message
                                                         // Send it to WarPigs (for now)
                                                         let msg = prompt.buffer.iter().collect::<String>();
-                                                        self.chat.push(Ok(format!("EU: {msg}")));
-                                                        self.client.borrow_mut().send_message("WarPigs".to_string(), msg);
+                                                        let msg = self.client.borrow_mut().send_message("WarPigs".to_string(), msg);
+                                                        self.chat.push(
+                                                            StyledLine::StyledItem(
+                                                                Styled::StyledString(
+                                                                    ContentStyle {
+                                                                        foreground_color: Some(Color::White),
+                                                                        background_color: Some(Color::Black),
+                                                                        underline_color: Some(Color::Green),
+                                                                        attributes: Attributes::from(Attribute::Underlined),
+                                                                    },
+                                                                    msg,
+                                                                )
+                                                            )
+                                                        );
                                                     } else {
-                                                        self.chat.push(Err("Not connected".to_string()));
+                                                        self.chat.push(StyledLine::StyledItem(Styled::StyledStr(CS_ERR.clone(), "Not connected")));
                                                     }
                                                 }
                                             }
@@ -207,15 +256,21 @@ impl Tui {
                 let n = self.chat.len();
                 let m = n.checked_sub(boundary.h).unwrap_or(0);
                 for (dy, line) in self.chat.iter().skip(m).enumerate() {
-                    let (line, color) = match line {
-                        Ok(x) => { (x, Color::White) }
-                        Err(x) => { (x, Color::Red) }
-                    };
-                    let line_chars: Vec<_> = line.chars().collect();
-                    self.buffer.put_cells(
-                        boundary.x, boundary.y + dy,
-                        line_chars.get(0..boundary.w).unwrap_or(&line_chars),
-                        color, Color::Black);
+                    for (text, fg, bg, ul, at) in match line {
+                        StyledLine::StyledItem(item) => vec!(Self::styled_to_tuple(item)),
+                        StyledLine::StyledVec(v) => {
+                            let mut tupple_vec: Vec<_> = Vec::with_capacity(v.len());
+                            for item in v {
+                                tupple_vec.push(Self::styled_to_tuple(item));
+                            }
+                            tupple_vec
+                        }
+                    } {
+                        self.buffer.put_cells(
+                            boundary.x, boundary.y + dy,
+                            text.get(0..boundary.w).unwrap_or(&text),
+                            fg.unwrap_or(Color::White), bg.unwrap_or(Color::Black), ul.unwrap_or(Color::Reset), at);
+                    }
                 }
             }
             let status_label = if self.client.borrow().is_connected() {
@@ -231,7 +286,7 @@ impl Tui {
                 if let Some(w) = self.width.checked_sub(1) {
                     prompt.render(&mut self.buffer, x, y as usize, w as usize);
                 }
-                self.buffer.put_cell(0, y as usize, '-', Color::White, Color::Black);
+                self.buffer.put_cell(0, y as usize, '-', Color::White, Color::Black, Color::Reset, AT_RST.clone());
             }
 
             self.buffer.update(&mut stdout)?;
@@ -251,12 +306,21 @@ impl Tui {
         self.deinit()
     }
 
+    fn styled_to_tuple(item: &Styled) -> (Vec<char>, Option<Color>, Option<Color>, Option<Color>, Attributes) {
+        match item {
+            Styled::StyledString(style, data) => (data.chars().collect::<Vec<char>>(), style.foreground_color, style.background_color, style.underline_color, style.attributes),
+            Styled::StyledStr(style, data) => (data.chars().collect(), style.foreground_color, style.background_color, style.underline_color, style.attributes),
+            Styled::StyledChar(style, c) => (vec!(*c), style.foreground_color, style.background_color, style.underline_color, style.attributes),
+            Styled::StyledByteArray(style, arr) => (arr.iter().map(|&c| { c as char }).collect(), style.foreground_color, style.background_color, style.underline_color, style.attributes),
+        }
+    }
+
     fn status_bar(&mut self, label: &str, x: usize, y: usize, w: usize) {
         let label_chars: Vec<_> = label.chars().collect();
         let n = cmp::min(label_chars.len(), w);
-        self.buffer.put_cells(x, y, &label_chars[..n], Color::Black, Color::White);
+        self.buffer.put_cells(x, y, &label_chars[..n], Color::Black, Color::White, Color::Reset, AT_RST.clone());
         for x in label.len()..w {
-            self.buffer.put_cell(x, y, ' ', Color::Black, Color::White);
+            self.buffer.put_cell(x, y, ' ', Color::Black, Color::White, Color::Reset, AT_RST.clone());
         }
     }
 }
