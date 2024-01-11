@@ -14,24 +14,26 @@ use crate::client::Client;
 use crate::tui::commands::CmdErr::*;
 use crate::tui::commands::CmdOk::*;
 
+#[derive(PartialEq)]
 pub enum CmdOk {
     Ran,
-    Print(&'static str),
-    Help(&'static str, &'static str),
+    Print(String),
+    Help(String, String),
     Quit,
 }
 
+#[derive(Debug)]
 pub enum CmdErr {
     NotACommand,
     NotConnected,
     AlreadyConnected,
     InvalidParameters,
-    InvalidCommand(&'static str),
+    InvalidCommand(String),
     HelpNotFound,
 }
 
 pub type CommandResult = Result<CmdOk, CmdErr>;
-type CommandFunc = fn(&mut Commands, &str) -> CommandResult;
+type CommandFunc = fn(&mut CommandParser, &str) -> CommandResult;
 
 struct Command {
     name: &'static str,
@@ -40,30 +42,26 @@ struct Command {
     run: CommandFunc,
 }
 
-pub struct Commands {
+pub struct CommandParser {
     client: Rc<RefCell<Client>>,
     cmd_list: Vec<Command>,
 }
 
-impl Commands {
+impl CommandParser {
     pub fn new(client: Rc<RefCell<Client>>) -> Self {
-        let mut result = Commands {
-            cmd_list: Vec::new(),
-            client,
-        };
+        let mut result = CommandParser { cmd_list: Vec::new(), client };
 
         result.register("join", "Join a channel", "/join <channel>", Self::join);
         result.register("j", "Join a channel", "/j <channel>", Self::join);
 
+        result.register("connect", "Connect to a server at <ip> and <port>", "/connect <ip> <port>", Self::connect);
         result.register("c", "connects to quakenet", "/c", Self::connect_quakenet);
-        result.register(
-            "connect",
-            "Connect to a server at <ip> and <port>",
-            "/connect <ip> <port>",
-            Self::connect,
-        );
+
         result.register("quit", "Close the chat", "/quit", Self::quit);
+        result.register("q", "Close the chat", "/q", Self::quit);
+
         result.register("help", "Print help", "/help [command]", Self::help);
+        result.register("h", "Print help", "/h [command]", Self::help);
 
         result
     }
@@ -79,9 +77,7 @@ impl Commands {
                 let _ = self.client.borrow_mut().connect(format!("{ip}:{port}"));
                 Ok(Ran)
             }
-            _ => {
-                Err(InvalidParameters)
-            }
+            _ => Err(InvalidParameters),
         }
     }
 
@@ -120,7 +116,7 @@ impl Commands {
         match &chunks[..] {
             &[command] => {
                 if let Some(cmd) = self.find_command(command) {
-                    return Ok(Help(cmd.description, cmd.signature));
+                    return Ok(Help(cmd.description.into(), cmd.signature.into()));
                 }
             }
             &[] => {
@@ -133,13 +129,7 @@ impl Commands {
         Ok(Ran)
     }
 
-    fn register(
-        &mut self,
-        name: &'static str,
-        description: &'static str,
-        signature: &'static str,
-        run_function: CommandFunc,
-    ) {
+    fn register(&mut self, name: &'static str, description: &'static str, signature: &'static str, run_function: CommandFunc) {
         if let Some(cmd) = self.cmd_list.iter_mut().find(|command| command.name == name) {
             cmd.description = description;
             cmd.signature = signature;
@@ -158,15 +148,15 @@ impl Commands {
         self.cmd_list.iter().find(|command| command.name == name)
     }
 
-    pub fn try_run(&mut self, prompt: &[char]) -> CommandResult {//Option<(&'a [char], &'a [char])> {
+    pub fn try_run(&mut self, prompt: &String) -> CommandResult {
         if let Some(prompt) = prompt.strip_prefix(&['/']) {
-            let mut iter = prompt.splitn(2, |x| *x == ' ');
-            let name = iter.next().unwrap_or(prompt).iter().collect::<String>();
-            let argument = iter.next().unwrap_or(&[]).iter().collect::<String>();
+            let mut iter = prompt.splitn(2, |x| x == ' ');
+            let name = iter.next().unwrap_or(prompt);
+            let argument = iter.next().unwrap_or("");
             return if let Some(command) = self.find_command(&name) {
                 (command.run)(self, &argument)
             } else {
-                Err(InvalidCommand("/{name}`"))
+                Err(InvalidCommand(format!("/{name}")))
             };
         }
         Err(NotACommand)

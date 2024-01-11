@@ -5,13 +5,9 @@ use std::ops::DerefMut;
 
 use crate::client::repliestypes::Replies;
 use crate::client::ringbuffer::RingBuffer;
-use crate::tui::CS_ERR;
-use crate::tui::CS_OK;
-use crate::tui::Styled;
-use crate::tui::StyledLine;
 
-mod ringbuffer;
 mod repliestypes;
+mod ringbuffer;
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -31,7 +27,7 @@ impl fmt::Display for ClientError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UserInfo {
     nick: String,
     user: String,
@@ -76,28 +72,25 @@ pub struct Channel {
     user_list: Vec<UserInfo>,
 }
 
-pub type MessageDisplay = Result<String, String>;
-
 pub struct Client {
     stream: Option<TcpStream>,
     buffer: RingBuffer<u8>,
     connected: bool,
     user_info: UserInfo,
-    return_lines: Vec<StyledLine>,
+    return_lines: Vec<String>,
 }
 
 macro_rules! chat_msg {
     ($chat:expr, $($arg:tt)*) => {
-        $chat.push(StyledLine::StyledItem(Styled::StyledString(CS_OK.clone(), format!($($arg)*))))
+        $chat.push(format!($($arg)*));
     }
 }
 
 macro_rules! parse_error {
     ($chat:expr, $($arg:tt)*) => {
-        $chat.push(StyledLine::StyledItem(Styled::StyledString(CS_ERR.clone(), format!($($arg)*))))
+        $chat.push(format!($($arg)*));
     }
 }
-
 
 impl Client {
     pub fn new(user_info: UserInfo) -> Self {
@@ -155,21 +148,24 @@ impl Client {
         }
     }
 
-    pub fn process(&mut self) -> Vec<crate::tui::StyledLine> {
+    pub fn poll(&mut self) -> Vec<String> {
         let mut new_data = false;
         if let Some(ref mut stream) = self.stream {
             match stream.read_vectored(self.buffer.slices().deref_mut()) {
-                Ok(n) => if n > 0 {
-                    self.buffer.wrote(n);
-                    new_data = true;
+                Ok(n) => {
+                    if n > 0 {
+                        self.buffer.wrote(n);
+                        new_data = true;
+                    }
                 }
-                Err(e) => if e.kind() != ErrorKind::WouldBlock {
-                    parse_error!(self.return_lines, "{}", e);
-                    self.connected = false;
+                Err(e) => {
+                    if e.kind() != ErrorKind::WouldBlock {
+                        parse_error!(self.return_lines, "{}", e);
+                        self.connected = false;
+                    }
                 }
             }
         }
-
 
         if new_data {
             self.try_read_server_data();
@@ -188,7 +184,9 @@ impl Client {
     }
 
     fn try_parse_server_data(&mut self, message: String) {
-        if self.process_ping(&message) { return; }
+        if self.process_ping(&message) {
+            return;
+        }
         if let Some((source, rest)) = message.strip_prefix(':').and_then(|m| m.split_once(' ')) {
             if let Some((msg_type, rest)) = rest.split_once(' ') {
                 if msg_type.len() == 3 {
@@ -205,7 +203,7 @@ impl Client {
             }
         }
 
-        parse_error!(self.return_lines,"<<< {message}");
+        parse_error!(self.return_lines, "<<< {message}");
     }
 
     fn process_ping(&mut self, message: &str) -> bool {
@@ -225,8 +223,17 @@ impl Client {
 
     fn try_parse_server_reply(&mut self, _source: &str, msg_type: Replies, _dest: &str, content: &str) -> bool {
         match msg_type {
-            Replies::RPL_WELCOME | Replies::RPL_YOURHOST | Replies::RPL_CREATED | Replies::RPL_MYINFO | Replies::RPL_BOUNCE | Replies::RPL_LUSERCLIENT | Replies::RPL_LUSERME | Replies::RPL_MOTDSTART | Replies::RPL_MOTD | Replies::RPL_ENDOFMOTD => {
-                chat_msg!(self.return_lines,"{}", content.trim_start_matches([':', ' ']));
+            Replies::RPL_WELCOME
+            | Replies::RPL_YOURHOST
+            | Replies::RPL_CREATED
+            | Replies::RPL_MYINFO
+            | Replies::RPL_BOUNCE
+            | Replies::RPL_LUSERCLIENT
+            | Replies::RPL_LUSERME
+            | Replies::RPL_MOTDSTART
+            | Replies::RPL_MOTD
+            | Replies::RPL_ENDOFMOTD => {
+                chat_msg!(self.return_lines, "{}", content.trim_start_matches([':', ' ']));
                 true
             }
             _ => false,

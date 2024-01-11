@@ -1,6 +1,6 @@
-#[allow(dead_code)]
 #[allow(non_camel_case_types)]
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum Replies {
     RPL_WELCOME,
     RPL_YOURHOST,
@@ -166,7 +166,6 @@ pub enum Replies {
     UNKNOWN(String),
 }
 
-#[allow(dead_code)]
 impl Replies {
     pub fn from_str(numbers: &str) -> Replies {
         match numbers {

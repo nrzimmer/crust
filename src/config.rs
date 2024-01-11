@@ -1,5 +1,5 @@
-use std::{fs, io};
 use std::io::Write;
+use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,20 +14,17 @@ pub struct User {
 
 impl User {
     pub fn new(nicknames: Vec<String>, username: String, realname: String) -> Self {
-        Self {
-            nicknames,
-            username,
-            realname,
-        }
+        Self { nicknames, username, realname }
     }
 
     pub fn clean(&self) -> Self {
         Self {
-            nicknames: self.nicknames.iter().map(|nick| {
-                nick.trim().to_string()
-            }).filter(|nick| {
-                !nick.is_empty()
-            }).collect::<Vec<_>>(),
+            nicknames: self
+                .nicknames
+                .iter()
+                .map(|nick| nick.trim().to_string())
+                .filter(|nick| !nick.is_empty())
+                .collect::<Vec<_>>(),
             username: self.username.trim().to_string(),
             realname: self.realname.trim().to_string(),
         }
@@ -71,14 +68,14 @@ impl Config {
     pub fn save(&self) {
         let file_path = Self::config_file_path();
         match serde_json::to_string_pretty(self) {
-            Ok(json) => {
-                match fs::write(file_path, json.into_bytes()) {
-                    Ok(_) => { return; }
-                    Err(e) => {
-                        eprintln!("Failed to save the configuration. Error: {e}.");
-                    }
+            Ok(json) => match fs::write(file_path, json.into_bytes()) {
+                Ok(_) => {
+                    return;
                 }
-            }
+                Err(e) => {
+                    eprintln!("Failed to save the configuration. Error: {e}.");
+                }
+            },
             Err(e) => {
                 eprintln!("Failed to serialize the configuration. Error: {e}.");
             }
@@ -87,7 +84,6 @@ impl Config {
 
     pub fn load() -> Option<Self> {
         let file_path = Self::config_file_path();
-
 
         if let Ok(content) = fs::read_to_string(file_path) {
             if let Ok(mut config) = serde_json::from_str::<Config>(&content) {
@@ -114,10 +110,16 @@ impl Config {
     }
 
     fn config_file_path() -> String {
-        format!("{home}/.config/{app_name}", home = match std::env::var("HOME") {
-            Ok(path) => path,
-            Err(_) => { panic!("Could not find current user home folder! $HOME variable not set!") }
-        }, app_name = app::name())
+        format!(
+            "{home}/.config/{app_name}",
+            home = match std::env::var("HOME") {
+                Ok(path) => path,
+                Err(_) => {
+                    panic!("Could not find current user home folder! $HOME variable not set!")
+                }
+            },
+            app_name = app::name()
+        )
     }
 }
 
@@ -156,20 +158,25 @@ pub fn request_config() -> Option<Config> {
     let mut nicks: Vec<String> = Vec::<String>::new();
 
     match request_input("username") {
-        None => { return None; }
-        Some(value) => { username = value }
+        None => {
+            return None;
+        }
+        Some(value) => username = value,
     }
 
     match request_input("real name") {
-        None => { return None; }
-        Some(value) => { realname = value }
+        None => {
+            return None;
+        }
+        Some(value) => realname = value,
     }
-
 
     loop {
         match request_input("nickname") {
-            None => { return None; }
-            Some(value) => { nickname = value }
+            None => {
+                return None;
+            }
+            Some(value) => nickname = value,
         }
         nicks.push(nickname);
 

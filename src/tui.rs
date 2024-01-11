@@ -1,326 +1,264 @@
-// The initial version of this file is "heavily based on"/"copied from" Tsoding 4at chat client.
-// Project: https://github.com/tsoding/4at
-// File: https://github.com/tsoding/4at/blob/789976acf2764bd4733b05f7d06f2cc889c1cc4c/src/client.rs
-//
-// For more information:
-//
-// Youtube playlist about the project: https://www.youtube.com/watch?v=qmmQAAJzM54&list=PLpM-Dvs8t0VZ1tPn-Qqdro3p_5s1HuMyF
-// Twitch: https://www.twitch.tv/tsoding
-
-use std::{cmp, io, thread};
-use std::any::Any;
+use crate::client::Client;
+use crate::tui::commands::CmdErr;
+use crate::tui::commands::CmdOk;
+use crate::tui::commands::CommandParser;
+use crate::tui::constants::MIN_CHAT_WIDTH;
+use crate::tui::traits::{Dirty, Draw, Resize};
+use crate::tui::widgets::bufferlist::BufferList;
+use crate::tui::widgets::chat::Chat;
+use crate::tui::widgets::nicklist::NickList;
+use crate::tui::widgets::prompt::Prompt;
+use crate::tui::widgets::status::Status;
+use crate::tui::widgets::topic::Topic;
+use crate::tui::widgets::vertbar::{VertBar, VertBarType};
+use crossterm::cursor::MoveTo;
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::style::{Color, Print, Stylize};
+use crossterm::terminal::{Clear, ClearType};
+use crossterm::{event, QueueableCommand};
 use std::cell::RefCell;
-use std::fmt::Display;
-use std::io::{stdout, Write};
+use std::io::Write;
 use std::rc::Rc;
 use std::time::Duration;
+use std::{io, thread};
 
-use crossterm::{event, terminal};
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::style::{Attribute, Attributes, Color, ContentStyle};
-use lazy_static::lazy_static;
-
-use doublebuffer::DoubleBuffer;
-use prompt::Prompt;
-
-use crate::client::Client;
-use crate::tui::commands::CmdErr::*;
-use crate::tui::commands::CmdOk::*;
-use crate::tui::commands::Commands;
-
-mod doublebuffer;
-mod prompt;
 mod commands;
-mod topic;
-mod bufferselector;
-mod users;
-mod logdisplay;
+mod constants;
+mod position;
+mod traits;
+mod widgets;
 
 macro_rules! todo_ui {
     () => {
-        let _ = terminal::disable_raw_mode();
-        println!("");
+        let _ = crossterm::terminal::disable_raw_mode();
+        println!();
+        todo!();
+    };
+    ($value:expr) => {
+        let _ = crossterm::terminal::disable_raw_mode();
+        println!();
+        println!("{:#?}", $value);
         todo!();
     };
 }
-
-struct Rect {
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-}
-
-pub enum Styled {
-    StyledString(ContentStyle, String),
-    StyledStr(ContentStyle, &'static str),
-    StyledChar(ContentStyle, char),
-    StyledByteArray(ContentStyle, Vec<u8>),
-}
-
-pub enum StyledLine {
-    StyledItem(Styled),
-    StyledVec(Vec<Styled>),
-}
-
-pub struct Tui {
+pub struct Window {
+    buffer_list: BufferList,
+    topic: Topic,
+    chat: Chat,
+    nicks: NickList,
+    status: Status,
+    prompt: Prompt,
+    left_bar: VertBar,
+    right_bar: VertBar,
+    width: u16,
+    height: u16,
+    out: io::Stdout,
     client: Rc<RefCell<Client>>,
-    buffer: DoubleBuffer,
-    width: usize,
-    height: usize,
-    chat: Vec<StyledLine>,
+    parser: CommandParser,
 }
 
-lazy_static! {
-    pub static ref AT_RST : Attributes = Attributes::from(Attribute::Reset);
-
-    pub static ref CS_OK : ContentStyle = ContentStyle {
-        foreground_color: Some(Color::White),
-        background_color: Some(Color::Black),
-        underline_color: None,
-        attributes: AT_RST.clone(),
-    };
-
-    pub static ref CS_ERR : ContentStyle = ContentStyle {
-        foreground_color: Some(Color::Red),
-        background_color: Some(Color::Black),
-        underline_color: None,
-        attributes: AT_RST.clone(),
+macro_rules! set_all_dirty {
+    ($self:ident) => {
+        $self.buffer_list.dirty();
+        $self.topic.dirty();
+        $self.chat.dirty();
+        $self.nicks.dirty();
+        $self.status.dirty();
+        $self.prompt.dirty();
+        $self.left_bar.dirty();
+        $self.right_bar.dirty();
     };
 }
 
-impl Tui {
-    pub fn new(client: Rc<RefCell<Client>>) -> Self {
-        thread::sleep(Duration::from_millis(1000));
-        let (w, h) = terminal::size().unwrap();
-        let width = w as usize;
-        let height = h as usize;
-        Self {
-            client,
-            buffer: DoubleBuffer::new(width, height),
+impl Window {
+    pub fn new(width: u16, height: u16, client: Rc<RefCell<Client>>) -> Self {
+        let client_clone = client.clone();
+        let mut result = Self {
+            buffer_list: BufferList::new(width, height),
+            topic: Topic::new(width, height),
+            chat: Chat::new(width, height),
+            nicks: NickList::new(width, height),
+            status: Status::new(width, height),
+            prompt: Prompt::new(width, height),
+            left_bar: VertBar::new(width, height, VertBarType::Left),
+            right_bar: VertBar::new(width, height, VertBarType::Right),
             width,
             height,
-            chat: Vec::new(),
+            out: std::io::stdout(),
+            client,
+            parser: CommandParser::new(client_clone),
+        };
+        let _ = result.resize(width, height);
+        result
+    }
+
+    fn can_draw(&self) -> bool {
+        let needed_width = self.buffer_list.size.width + self.nicks.size.width + MIN_CHAT_WIDTH + 2; // 2 - vertical bars
+        self.width >= needed_width && self.height >= 16
+    }
+
+    pub fn draw_terminal_too_small(&mut self) -> io::Result<()> {
+        self.out.queue(Clear(ClearType::All))?;
+        let text = " Terminal too small ".on(Color::Red).with(Color::White).bold();
+        self.out.queue(MoveTo(self.width / 2 - 10, self.height / 2))?;
+        self.out.queue(Print(text))?;
+        self.out.queue(crossterm::cursor::Hide)?;
+        Ok(())
+    }
+
+    pub fn draw(&mut self) -> io::Result<()> {
+        if self.can_draw() {
+            self.buffer_list.draw(&mut self.out)?;
+            self.topic.draw(&mut self.out)?;
+            self.chat.draw(&mut self.out)?;
+            self.nicks.draw(&mut self.out)?;
+            self.status.draw(&mut self.out)?;
+            self.prompt.draw(&mut self.out)?;
+        } else {
+            self.draw_terminal_too_small()?;
         }
+        self.out.flush()?;
+        Ok(())
     }
 
-    fn init(&self) -> io::Result<()> {
-        terminal::enable_raw_mode()
-    }
+    pub fn resize(&mut self, width: u16, height: u16) -> io::Result<()> {
+        self.width = width;
+        self.height = height;
 
-    fn deinit(&self) -> io::Result<()> {
-        let res = terminal::disable_raw_mode();
-        println!();
-        res
+        self.buffer_list.resize(self.buffer_list.pos, self.buffer_list.size.set_height(self.height));
+
+        self.left_bar
+            .resize(self.left_bar.pos.set_x(self.buffer_list.size.width), self.left_bar.size.set_height(self.height));
+
+        self.topic.resize(
+            self.topic.pos.set_x(self.left_bar.pos.x + 1),
+            self.topic.size.set_width(self.width - self.topic.pos.x),
+        );
+
+        self.nicks.resize(
+            self.nicks.pos.set_x(self.width - self.nicks.size.width),
+            self.nicks.size.set_height(self.height - 3), // topic + status + prompt
+        );
+
+        self.right_bar.resize(
+            self.right_bar.pos.set_x(self.nicks.pos.x - 1),
+            self.right_bar.size.set_height(self.nicks.size.height),
+        );
+
+        self.chat.resize(
+            self.chat.pos.set_x(self.topic.pos.x),
+            (self.right_bar.pos.x - self.chat.pos.x, self.right_bar.size.height).into(),
+        );
+
+        self.status
+            .resize((self.chat.pos.x, self.height - 2).into(), self.status.size.set_width(self.topic.size.width));
+
+        self.prompt
+            .resize((self.chat.pos.x, self.height - 1).into(), self.prompt.size.set_width(self.status.size.width));
+
+        self.out.queue(Clear(ClearType::All))?;
+        set_all_dirty!(self);
+        if self.can_draw() {
+            self.left_bar.draw(&mut self.out)?;
+            self.right_bar.draw(&mut self.out)?;
+            self.draw()?;
+            self.out.flush()?;
+        } else {
+            self.draw_terminal_too_small()?;
+        }
+
+        Ok(())
     }
 
     pub fn run(&mut self) -> io::Result<()> {
-        self.init()?;
+        while self.poll() {
+            //Poll Client
+            self.client.borrow_mut().poll().iter().for_each(|s| self.chat.append(s.clone()));
 
-        let mut command_parser = Commands::new(self.client.clone());
-        let mut stdout = stdout();
-        let mut prompt = Prompt::default();
-        self.buffer.flush(&mut stdout)?;
-        'main: loop {
-            while event::poll(Duration::ZERO).unwrap() {
-                match event::read() {
-                    Ok(Event::Resize(w, h)) => {
-                        self.width = w as usize;
-                        self.height = h as usize;
-                        self.buffer.resize(self.width, self.height);
-                        self.buffer.flush(&mut stdout)?;
+            self.draw()?;
+
+            thread::sleep(Duration::from_millis(16));
+        }
+
+        Ok(())
+    }
+
+    fn poll(&mut self) -> bool {
+        while event::poll(Duration::ZERO).unwrap() {
+            match event::read() {
+                Ok(Event::Resize(w, h)) => {
+                    if let Err(_) = self.resize(w, h) {
+                        return false;
                     }
-                    Ok(Event::Paste(data)) => prompt.insert_str(&data),
-                    Ok(Event::Key(event)) => {
-                        if event.kind == KeyEventKind::Press {
-                            match event.code {
-                                KeyCode::Char(x) => {
-                                    if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                        match x {
-                                            'c' => { break 'main; }
-                                            'k' => prompt.delete_until_end(),
-                                            'w' => prompt.remove_left_word(),
-                                            _ => {}
-                                        }
-                                    } else {
-                                        prompt.insert(x);
-                                    }
+                }
+                Ok(Event::Key(event)) => {
+                    if event.kind == KeyEventKind::Press {
+                        if let KeyCode::Char(ch) = event.code {
+                            if event.modifiers.contains(KeyModifiers::CONTROL) {
+                                if 'c' == ch {
+                                    return false;
                                 }
-                                KeyCode::Up => {
-                                    //Todo - implement prompt history
-                                }
-                                KeyCode::Down => {
-                                    //Todo - implement prompt history
-                                }
-                                KeyCode::Left => {
-                                    if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                        prompt.left_word();
-                                    } else {
-                                        prompt.left_char();
-                                    }
-                                }
-                                KeyCode::Right => {
-                                    if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                        prompt.right_word();
-                                    } else {
-                                        prompt.right_char();
-                                    }
-                                }
-                                KeyCode::Backspace => {
-                                    if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                        prompt.remove_left_word();
-                                    } else {
-                                        prompt.backspace()
-                                    }
-                                }
-                                KeyCode::Delete => {
-                                    if event.modifiers.contains(KeyModifiers::CONTROL) {
-                                        prompt.remove_right_word();
-                                    } else {
-                                        prompt.delete()
-                                    }
-                                }
-                                KeyCode::Home => {
-                                    prompt.home();
-                                }
-                                KeyCode::End => {
-                                    prompt.end();
-                                }
-                                KeyCode::Enter => {
-                                    let result = command_parser.try_run(&prompt.buffer);
-                                    match result {
-                                        Ok(success) => {
-                                            match success {
-                                                Ran => {}
-                                                Print(_text) => { todo_ui!(); }
-                                                Help(_first, _second) => { todo_ui!(); }
-                                                Quit => { return self.deinit(); }
-                                            }
-                                        }
-                                        Err(error) => {
-                                            match error {
-                                                NotConnected => { todo_ui!(); }
-                                                AlreadyConnected => { todo_ui!(); }
-                                                InvalidParameters => { todo_ui!(); }
-                                                InvalidCommand(_cmd) => { todo_ui!(); }
-                                                HelpNotFound => { todo_ui!(); }
-                                                NotACommand => {
-                                                    if self.client.borrow().is_connected() {
-                                                        // This is a message
-                                                        // Send it to WarPigs (for now)
-                                                        let msg = prompt.buffer.iter().collect::<String>();
-                                                        let msg = self.client.borrow_mut().send_message("WarPigs".to_string(), msg);
-                                                        self.chat.push(
-                                                            StyledLine::StyledItem(
-                                                                Styled::StyledString(
-                                                                    ContentStyle {
-                                                                        foreground_color: Some(Color::White),
-                                                                        background_color: Some(Color::Black),
-                                                                        underline_color: Some(Color::Green),
-                                                                        attributes: Attributes::from(Attribute::Underlined),
-                                                                    },
-                                                                    msg,
-                                                                )
-                                                            )
-                                                        );
-                                                    } else {
-                                                        self.chat.push(StyledLine::StyledItem(Styled::StyledStr(CS_ERR.clone(), "Not connected")));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    prompt.clear();
-                                }
-                                _ => {}
+                            }
+                        }
+                        if let Some(text) = self.prompt.key_press(event) {
+                            if self.parse(text) == CmdOk::Quit {
+                                return false;
                             }
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
+        }
+        true
+    }
 
-            self.chat.append(&mut self.client.borrow_mut().process());
-
-            self.buffer.clear();
-            self.status_bar("Crust", 0, 0, self.width.into());
-            // TODO: vertical scrolling for chat window
-            if let Some(h) = self.height.checked_sub(3) {
-                let boundary = Rect {
-                    x: 0,
-                    y: 1,
-                    w: self.width,
-                    h,
-                };
-
-                let n = self.chat.len();
-                let m = n.checked_sub(boundary.h).unwrap_or(0);
-                for (dy, line) in self.chat.iter().skip(m).enumerate() {
-                    for (text, fg, bg, ul, at) in match line {
-                        StyledLine::StyledItem(item) => vec!(Self::styled_to_tuple(item)),
-                        StyledLine::StyledVec(v) => {
-                            let mut tupple_vec: Vec<_> = Vec::with_capacity(v.len());
-                            for item in v {
-                                tupple_vec.push(Self::styled_to_tuple(item));
-                            }
-                            tupple_vec
+    fn parse(&mut self, command: String) -> CmdOk {
+        let result = self.parser.try_run(&command);
+        match result {
+            Ok(success) => match success {
+                CmdOk::Ran => {}
+                CmdOk::Print(_text) => {
+                    todo_ui!();
+                }
+                CmdOk::Help(_first, _second) => {
+                    todo_ui!();
+                }
+                CmdOk::Quit => {
+                    return CmdOk::Quit;
+                }
+            },
+            Err(error) => {
+                match error {
+                    CmdErr::NotConnected => {
+                        todo_ui!();
+                    }
+                    CmdErr::AlreadyConnected => {
+                        todo_ui!();
+                    }
+                    CmdErr::InvalidParameters => {
+                        todo_ui!();
+                    }
+                    CmdErr::InvalidCommand(cmd) => {
+                        todo_ui!(CmdErr::InvalidCommand(cmd));
+                    }
+                    CmdErr::HelpNotFound => {
+                        todo_ui!();
+                    }
+                    CmdErr::NotACommand => {
+                        if self.client.borrow().is_connected() {
+                            // This is a message
+                            // Send it to WarPigs (for now)
+                            let msg = self.client.borrow_mut().send_message("WarPigs".to_string(), command);
+                            self.chat.append(msg);
+                        } else {
+                            self.chat.append("Not connected".into());
                         }
-                    } {
-                        self.buffer.put_cells(
-                            boundary.x, boundary.y + dy,
-                            text.get(0..boundary.w).unwrap_or(&text),
-                            fg.unwrap_or(Color::White), bg.unwrap_or(Color::Black), ul.unwrap_or(Color::Reset), at);
                     }
                 }
             }
-            let status_label = if self.client.borrow().is_connected() {
-                "Status: Online"
-            } else {
-                "Status: Offline"
-            };
-            if let Some(h) = self.height.checked_sub(2) {
-                self.status_bar(status_label, 0, h as usize, self.width.into());
-            }
-            if let Some(y) = self.height.checked_sub(1) {
-                let x = 1;
-                if let Some(w) = self.width.checked_sub(1) {
-                    prompt.render(&mut self.buffer, x, y as usize, w as usize);
-                }
-                self.buffer.put_cell(0, y as usize, '-', Color::White, Color::Black, Color::Reset, AT_RST.clone());
-            }
-
-            self.buffer.update(&mut stdout)?;
-
-            if let Some(y) = self.height.checked_sub(1) {
-                let x = 1;
-                if let Some(w) = self.width.checked_sub(1) {
-                    let _ = prompt.sync_terminal_cursor(&mut stdout, x, y as usize, w as usize);
-                }
-            }
-            stdout.flush()?;
-            self.buffer.swap();
-
-            thread::sleep(Duration::from_millis(33));
         }
-
-        self.deinit()
-    }
-
-    fn styled_to_tuple(item: &Styled) -> (Vec<char>, Option<Color>, Option<Color>, Option<Color>, Attributes) {
-        match item {
-            Styled::StyledString(style, data) => (data.chars().collect::<Vec<char>>(), style.foreground_color, style.background_color, style.underline_color, style.attributes),
-            Styled::StyledStr(style, data) => (data.chars().collect(), style.foreground_color, style.background_color, style.underline_color, style.attributes),
-            Styled::StyledChar(style, c) => (vec!(*c), style.foreground_color, style.background_color, style.underline_color, style.attributes),
-            Styled::StyledByteArray(style, arr) => (arr.iter().map(|&c| { c as char }).collect(), style.foreground_color, style.background_color, style.underline_color, style.attributes),
-        }
-    }
-
-    fn status_bar(&mut self, label: &str, x: usize, y: usize, w: usize) {
-        let label_chars: Vec<_> = label.chars().collect();
-        let n = cmp::min(label_chars.len(), w);
-        self.buffer.put_cells(x, y, &label_chars[..n], Color::Black, Color::White, Color::Reset, AT_RST.clone());
-        for x in label.len()..w {
-            self.buffer.put_cell(x, y, ' ', Color::Black, Color::White, Color::Reset, AT_RST.clone());
-        }
+        //self.chat.append(command);
+        CmdOk::Ran
     }
 }

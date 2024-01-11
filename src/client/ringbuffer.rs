@@ -10,7 +10,9 @@ pub struct RingBuffer<T: PartialEq + Clone> {
 }
 
 impl<T: PartialEq + Clone> RingBuffer<T>
-    where T: Default, {
+where
+    T: Default,
+{
     pub fn new(size: usize) -> Self {
         RingBuffer {
             buffer: vec![T::default(); size],
@@ -30,18 +32,12 @@ impl<T: PartialEq + Clone> RingBuffer<T>
                         raw_data.offset((self.write_index * t_bytes) as isize),
                         (self.size - self.write_index - 1) * t_bytes,
                     )),
-                    IoSliceMut::new(std::slice::from_raw_parts_mut(
-                        raw_data,
-                        (self.read_index - 1) * t_bytes,
-                    )),
+                    IoSliceMut::new(std::slice::from_raw_parts_mut(raw_data, (self.read_index - 1) * t_bytes)),
                 ];
             }
         }
         unsafe {
-            return vec![IoSliceMut::new(std::slice::from_raw_parts_mut(
-                raw_data,
-                self.size * t_bytes,
-            ))];
+            return vec![IoSliceMut::new(std::slice::from_raw_parts_mut(raw_data, self.size * t_bytes))];
         }
     }
 
